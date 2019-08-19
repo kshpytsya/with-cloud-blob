@@ -12,7 +12,10 @@ script:
   - bash --version
   - /bin/sh --version
   - shellcheck --version
-  - inv check test build
+  - inv check
+  - inv test
+  - coveralls
+  - inv build
 deploy:
   - provider: script
     skip_cleanup: true
