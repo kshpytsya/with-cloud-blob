@@ -10,6 +10,7 @@
   - id: check-yaml
   - id: debug-statements
   - id: end-of-file-fixer
+    exclude: '^.bumpversion.cfg$'
   - id: forbid-new-submodules
   - id: mixed-line-ending
   - id: trailing-whitespace
