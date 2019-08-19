@@ -1,0 +1,23 @@
+dist: bionic
+language: python
+install:
+  - sudo update-alternatives --install /bin/sh sh /bin/bash 100
+  - pip install --upgrade setuptools pip
+  - pip install -r requirements-dev.txt
+  - pip install tox-travis
+  - pip list --format columns
+python:
+  - "3.7"
+script:
+  - bash --version
+  - /bin/sh --version
+  - shellcheck --version
+  - inv check test build
+deploy:
+  - provider: script
+    skip_cleanup: true
+    script: twine upload dist/*.tar.gz && twine upload dist/*.whl
+    on:
+      repo: kshpytsya/with-cloud-blob
+      tags: true
+      python: 3.7
