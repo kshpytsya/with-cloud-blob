@@ -1,4 +1,3 @@
-import contextlib
 import pathlib
 import typing as tp
 
@@ -8,37 +7,44 @@ import implements
 import with_cloud_blob.backend_intf as intf
 
 
-@implements.implements(intf.IBackend)
-class FileBackend:
+@implements.implements(intf.ILockBackend)
+class LockBackend:
+    @staticmethod
+    def make_lock(
+        *,
+        loc: str,
+        opts: intf.Options,
+    ) -> tp.ContextManager[tp.Any]:
+        intf.check_unknown_options(opts)
+        return filelock.FileLock(loc + ".lock")
+
+
+@implements.implements(intf.IStorageBackend)
+class StorageBackend:
     @staticmethod
     def modify(
         *,
         loc: str,
-        extra_locks: tp.Iterable[str],
-        modifier: tp.Callable[[tp.Optional[bytes]], tp.Optional[bytes]],
+        modifier: intf.StorageModifier,
         opts: intf.Options,
     ) -> None:
         intf.check_unknown_options(opts)
 
-        with contextlib.ExitStack() as es:
-            for i in list(extra_locks) + [loc]:
-                es.enter_context(filelock.FileLock(i + ".lock"))
+        path = pathlib.Path(loc)
+        data: tp.Optional[bytes]
+        if path.exists():
+            data = path.read_bytes()
+        else:
+            data = None
 
-            path = pathlib.Path(loc)
-            data: tp.Optional[bytes]
-            if path.exists():
-                data = path.read_bytes()
+        new_data = modifier(data)
+
+        if new_data != data:
+            if new_data is None:
+                path.unlink()
             else:
-                data = None
-
-            new_data = modifier(data)
-
-            if new_data != data:
-                if new_data is None:
-                    path.unlink()
-                else:
-                    with atomicwrites.atomic_write(str(path), overwrite=True, mode="wb") as f:
-                        f.write(new_data)
+                with atomicwrites.atomic_write(str(path), overwrite=True, mode="wb") as f:
+                    f.write(new_data)
 
     @staticmethod
     def load(

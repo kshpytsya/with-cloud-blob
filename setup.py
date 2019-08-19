@@ -15,7 +15,15 @@ setup(
     python_requires=">=3.7, <3.8",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
-    entry_points={"console_scripts": ["with-cloud-blob = with_cloud_blob._cli:main"]},
+    entry_points={
+        "console_scripts": ["with-cloud-blob = with_cloud_blob._cli:main"],
+        "with_cloud_blob.lock_backends": [
+            "file = with_cloud_blob.backends.file:LockBackend",
+        ],
+        "with_cloud_blob.storage_backends": [
+            "file = with_cloud_blob.backends.file:StorageBackend",
+        ],
+    },
     classifiers=[
         "Development Status :: 1 - Planning",
         # "Development Status :: 3 - Alpha",

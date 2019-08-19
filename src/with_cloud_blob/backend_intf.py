@@ -4,15 +4,15 @@ import implements
 
 
 Options = tp.Dict[str, str]
+StorageModifier = tp.Callable[[tp.Optional[bytes]], tp.Optional[bytes]]
 
 
-class IBackend(implements.Interface):
+class IStorageBackend(implements.Interface):
     @staticmethod
     def modify(
         *,
         loc: str,
-        extra_locks: tp.Iterable[str],
-        modifier: tp.Callable[[tp.Optional[bytes]], tp.Optional[bytes]],
+        modifier: StorageModifier,
         opts: Options,
     ) -> None:
         """
@@ -24,6 +24,17 @@ class IBackend(implements.Interface):
         loc: str,
         opts: Options,
     ) -> bytes:
+        """
+        """
+
+
+class ILockBackend(implements.Interface):
+    @staticmethod
+    def make_lock(
+        *,
+        loc: str,
+        opts: Options,
+    ) -> tp.ContextManager[tp.Any]:
         """
         """
 
