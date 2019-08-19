@@ -15,7 +15,7 @@ def bump(ctx, part='patch'):
 
 @task
 def check(ctx):
-    ctx.run("flake8 --max-line-length=120 setup.py tasks.py src tests")
+    ctx.run("pre-commit run --all-files")
 
 
 @task
