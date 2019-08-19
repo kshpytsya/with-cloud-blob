@@ -1,5 +1,6 @@
 dist: bionic
 language: python
+cache: pip
 install:
   - sudo update-alternatives --install /bin/sh sh /bin/bash 100
   - pip install --upgrade setuptools pip
