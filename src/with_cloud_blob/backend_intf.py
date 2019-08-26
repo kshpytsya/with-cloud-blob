@@ -76,6 +76,6 @@ class ILockBackend(implements.Interface):
         loc: str,
         opts: Options,
         timeout: float,
-    ) -> tp.ContextManager[tp.Any]:
+    ) -> tp.ContextManager[None]:
         """
         """

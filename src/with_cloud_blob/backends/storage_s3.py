@@ -4,41 +4,11 @@ import threading
 import time
 import typing as tp
 
-import boto3
 import botocore
 import implements
 import with_cloud_blob.backend_intf as intf
 
-
-def _boto_session(
-    opts: intf.Options,
-) -> boto3.Session:
-    kw = opts.mapped_update({
-        "profile": "profile_name",
-    })
-    return boto3.Session(**kw)
-
-
-def _boto_resource_s3(
-    session: boto3.Session,
-    opts: intf.Options,
-) -> tp.Any:
-    kw = opts.mapped_update({
-        "region": "region_name",
-        "endpoint": "endpoint_url",
-    })
-    return session.resource("s3", **kw)
-
-
-def _boto_resource_dynamodb(
-    session: boto3.Session,
-    opts: intf.Options,
-) -> tp.Any:
-    kw = opts.mapped_update({
-        "region": "region_name",
-        "dynamodb_endpoint": "endpoint_url",
-    })
-    return session.resource("dynamodb", **kw)
+from . import _boto_helpers as bh
 
 
 class _BucketKey:
@@ -62,7 +32,7 @@ class _DynamoDbKeyValueStore:
         ttl: int,
     ) -> None:
         self._table_name = opts.get("dynamodb_table") or "with-cloud-blob"
-        self._resource = _boto_resource_dynamodb(boto_session, opts)
+        self._resource = bh.boto_resource_dynamodb(boto_session, opts)
         self._table: tp.Any = None
         self._ttl = ttl
 
@@ -147,8 +117,6 @@ def _digest(data: tp.Optional[bytes]) -> bytes:
     if data is None:
         return b"*"
 
-    return hashlib.sha1(data).hexdigest().encode()
-    # TODO
     return hashlib.sha1(data).digest()
 
 
@@ -161,9 +129,10 @@ class Backend:
         modifier: intf.StorageModifier,
         opts: intf.Options,
     ) -> None:
-        session = _boto_session(opts)
-        s3 = _boto_resource_s3(session, opts)
+        session = bh.boto_session(opts)
+        s3 = bh.boto_resource_s3(session, opts)
 
+        # delay_put is used simulate eventual consistency of S3 in tests
         delay_put = float(opts.get("_delay_put") or "0")
         max_lag = int(opts.get("max_lag") or "30")
 
@@ -222,8 +191,8 @@ class Backend:
 
             def postponed() -> None:
                 time.sleep(delay_put)
-                session = _boto_session(opts)
-                s3 = _boto_resource_s3(session, opts)
+                session = bh.boto_session(opts)
+                s3 = bh.boto_resource_s3(session, opts)
                 bucket = s3.Bucket(bk.bucket)
                 action(bucket)
 
@@ -238,8 +207,8 @@ class Backend:
         loc: str,
         opts: intf.Options,
     ) -> bytes:
-        session = _boto_session(opts)
-        s3 = _boto_resource_s3(session, opts)
+        session = bh.boto_session(opts)
+        s3 = bh.boto_resource_s3(session, opts)
         opts.fail_on_unused()
         bk = _BucketKey(loc)
 

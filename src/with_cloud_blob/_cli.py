@@ -26,6 +26,7 @@ from . import backends
 # TODO extrypoints conditional on extras
 # TODO call error() for click exceptions
 # TODO proper errors on str to int/float casts
+# TODO test: time before lock timeout exception is approximately equal to requested timeout
 
 
 def error(s: str) -> None:
@@ -81,6 +82,7 @@ def modify_blob_with_locks(
 
     with contextlib.ExitStack() as es:
         for lock_backend, lock in zip(lock_backends, locks):
+            loc_prefix = lock.opts.get("prefix") or ""
             total_timeout = float(lock.opts.get("timeout") or "0")
             deadline = time.time() + total_timeout
 
@@ -100,7 +102,7 @@ def modify_blob_with_locks(
 
                         es.enter_context(
                             lock_backend.make_lock(
-                                loc=lock.loc or storage.loc,
+                                loc=loc_prefix + (lock.loc or storage.loc),
                                 opts=lock.opts,
                                 timeout=max(0, min(remaining, timeout_step if attempt > 0 else first_timeout)),
                             ),
@@ -150,10 +152,96 @@ def main(**opts: tp.Any) -> None:
 @base_command
 def cmd_newkey(**opts: tp.Any) -> None:
     """
-    Generate a new master key
+    Generate a new master key.
     """
     key = nacl.utils.random(nacl.secret.SecretBox.KEY_SIZE)
     sys.stdout.buffer.write(nacl.encoding.HexEncoder.encode(key))
+
+
+def modify_validate_lock(
+    ctx: tp.Any,
+    param: tp.Any,
+    values: tp.Tuple[str, ...],
+) -> tp.List[Locator]:
+    return [parse_locator(i) for i in values]
+
+
+def modify_validate_blob(
+    ctx: tp.Any,
+    param: tp.Any,
+    value: str,
+) -> Locator:
+    return parse_locator(value)
+
+
+@main.command(name="modify")
+@base_command
+@click.option(
+    "--lock",
+    multiple=True,
+    callback=modify_validate_lock,
+    metavar="<lock-locator>",
+    help="Locator of a lock to hold while executing <command>. May be specified multiple times.",
+)
+@click.option(
+    "--first-timeout",
+    default=10.0,
+    metavar="<T>",
+    help="Time in seconds to silently wait for each lock before starting to periodic reports.",
+    show_default=True,
+)
+@click.option(
+    "--timeout-step",
+    default=30.0,
+    metavar="<T>",
+    help="Time in seconds between periodic reports about waiting for lock acquisition.",
+    show_default=True,
+)
+@click.argument(
+    "blob",
+    callback=modify_validate_blob,
+)
+@click.argument("command", nargs=1)
+@click.argument("command_args", metavar="[ARGS]...", nargs=-1)
+def cmd_modify(**opts: tp.Any) -> None:
+    """
+    Modify blob.
+
+    Read <blob>, execute given <command>, and, in case of success, update <blob>.
+    Note: to pass any options to the command, prepend it with "--".
+    If <blob> exists, its contents will be accessible as a file named "blob"
+    in the temp directory used as the current working directory for running
+    the command. If command deletes the file, <blob> will be deleted.
+    """
+
+    def modifier(blob: tp.Optional[bytes]) -> tp.Optional[bytes]:
+        with tempdir() as td:
+            tdp = pathlib.Path(td)
+            blob_path = tdp / "blob"
+
+            if blob is not None:
+                blob_path.write_bytes(blob)
+
+            rc = subprocess.call(
+                [opts["command"]] + list(opts["command_args"]),
+                cwd=td,
+            )
+
+            if rc:
+                sys.exit(rc)
+
+            if blob_path.exists():
+                return blob_path.read_bytes()
+            else:
+                return None
+
+    modify_blob_with_locks(
+        storage=opts["blob"],
+        locks=opts["lock"],
+        modifier=modifier,
+        first_timeout=opts["first_timeout"],
+        timeout_step=opts["timeout_step"],
+    )
 
 
 def read_validate_blob(
@@ -189,12 +277,14 @@ def read_validate_blob(
     callback=read_validate_blob,
     metavar="<name>=<blob-locator>",
     help="Read <blob-locator> and store it as <name> in the temp "
-    + "directory used as the current working directory for running the command.",
+    + "directory used as the current working directory for running the command. "
+    + "May be specified multiple times.",
 )
-@click.argument("cmd", nargs=-1)
+@click.argument("command", nargs=1)
+@click.argument("command_args", metavar="[ARGS]...", nargs=-1)
 def cmd_read(**opts: tp.Any) -> None:
     """
-    Read blobs and execute given command.
+    Read blobs and execute given <command>.
     Note: to pass any options to the command, prepend it with "--".
     """
     with tempdir() as td:
@@ -218,7 +308,7 @@ def cmd_read(**opts: tp.Any) -> None:
                 sys.exit(1)
 
         rc = subprocess.call(
-            opts["cmd"],
+            [opts["command"]] + list(opts["command_args"]),
             cwd=td,
         )
 

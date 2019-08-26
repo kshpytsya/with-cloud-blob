@@ -5,10 +5,10 @@ import implements
 import with_cloud_blob.backend_intf as intf
 
 
-class MyFileLock(filelock.FileLock):
-    def __enter__(self) -> tp.Any:
+class _Lock(filelock.FileLock):
+    def __enter__(self) -> None:
         try:
-            return filelock.FileLock.__enter__(self)
+            filelock.FileLock.__enter__(self)
         except filelock.Timeout:
             raise intf.TimeoutError()
 
@@ -21,5 +21,5 @@ class Backend:
         loc: str,
         opts: intf.Options,
         timeout: float,
-    ) -> tp.ContextManager[tp.Any]:
-        return MyFileLock(loc + ".lock", timeout=timeout)
+    ) -> tp.ContextManager[None]:
+        return _Lock(loc + ".lock", timeout=timeout)
