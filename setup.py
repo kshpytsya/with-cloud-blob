@@ -18,10 +18,12 @@ setup(
     entry_points={
         "console_scripts": ["with-cloud-blob = with_cloud_blob._cli:main"],
         "with_cloud_blob.lock_backends": [
-            "file = with_cloud_blob.backends.file:LockBackend",
+            "file = with_cloud_blob.backends.lock_file:Backend",
+            "dynamodb = with_cloud_blob.backends.lock_dynamodb:Backend",
         ],
         "with_cloud_blob.storage_backends": [
-            "file = with_cloud_blob.backends.file:StorageBackend",
+            "file = with_cloud_blob.backends.storage_file:Backend",
+            "s3 = with_cloud_blob.backends.storage_s3:Backend",
         ],
     },
     classifiers=[
@@ -44,19 +46,14 @@ setup(
     ],
     install_requires=[
         "atomicwrites>=1.2.1,<2",
+        "boto3>=1.9.210,<2",
         "click>=7.0,<8",
         "click-log>=0.3.2,<1",
         "filelock>=3.0.8,<4",
         "implements>=0.1.4,<1",
         "jsonschema>=3.0.2,<4",
         "pynacl>=1.3.0,<2",
+        "python_dynamodb_lock>=0.9.1,<1",
         "py-ubjson>=0.14.0,<1",
-
     ],
-    extras_require={
-        "aws": [
-            "boto3>=1.9.210,<2",
-            "python_dynamodb_lock>=0.9.1,<1",
-        ],
-    },
 )

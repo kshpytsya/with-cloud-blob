@@ -38,7 +38,7 @@ def test_newkey(capfd: tp.Any) -> None:
         (["--blob=a=:file:/"], ["cat", "a"], 1, ""),
         (["--blob=a=:file:/"], ["true"], 1, ""),
         (["--blob=a=:file:/", "--allow-errors"], ["true"], 0, ""),
-        (["*abcxyz*ABC"], ["cat", "abcxyz"], 0, "ABC"),
+        (["*alpha*ONE", "*beta*TWO"], ["cat", "alpha", "beta"], 0, "ONETWO"),
     ],
 )
 def test_read(
@@ -88,3 +88,14 @@ def test_read_param_exceptions() -> None:
 
     with pytest.raises(click.BadParameter):
         cli(["read", "--blob=a=="])
+
+
+def test_backends_list(
+    capfd: tp.Any,
+) -> None:
+    cli(["backends", "list"])
+    captured = capfd.readouterr()
+    assert captured.err == ""
+    lines = captured.out.splitlines()
+    assert "lock: file" in lines
+    assert "storage: file" in lines

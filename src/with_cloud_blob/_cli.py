@@ -4,6 +4,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 import typing as tp
 from dataclasses import dataclass
 
@@ -24,6 +25,7 @@ from . import backends
 # TODO sys exit code range
 # TODO extrypoints conditional on extras
 # TODO call error() for click exceptions
+# TODO proper errors on str to int/float casts
 
 
 def error(s: str) -> None:
@@ -59,10 +61,10 @@ def parse_locator(s: str) -> Locator:
     return Locator(
         backend=fields[1],
         loc=fields[2],
-        opts={
+        opts=backend_intf.Options({
             i[0]: (i[1:] or [""])[0]
             for i in (j.split("=", 1) for j in fields[3:])
-        },
+        }),
     )
 
 
@@ -71,18 +73,43 @@ def modify_blob_with_locks(
     storage: Locator,
     locks: tp.Iterable[Locator],
     modifier: backend_intf.StorageModifier,
+    first_timeout: float,
+    timeout_step: float,
 ) -> None:
     storage_backend = backends.storage_backend(storage.backend)
     lock_backends = [backends.lock_backend(lock.backend) for lock in locks]
 
     with contextlib.ExitStack() as es:
         for lock_backend, lock in zip(lock_backends, locks):
-            es.enter_context(
-                lock_backend.make_lock(
-                    loc=lock.loc,
-                    opts=lock.opts,
-                ),
-            )
+            total_timeout = float(lock.opts.get("timeout") or "0")
+            deadline = time.time() + total_timeout
+
+            lock_descr = f"{lock.backend}:{lock.loc}"
+
+            attempt = 0
+
+            while True:
+                remaining = deadline - time.time()
+
+                if attempt > 0 and remaining < 0:
+                    raise click.ClickException(f"timed out waiting for {lock_descr}")
+                else:
+                    try:
+                        if attempt > 0:
+                            click.echo("waiting for lock {lock_descr}, deadline in {remaining:1.1f}s", err=True)
+
+                        es.enter_context(
+                            lock_backend.make_lock(
+                                loc=lock.loc or storage.loc,
+                                opts=lock.opts,
+                                timeout=max(0, min(remaining, timeout_step if attempt > 0 else first_timeout)),
+                            ),
+                        )
+                        attempt += 1
+                    except backend_intf.TimeoutError:
+                        continue
+
+                break
 
         storage_backend.modify(
             loc=storage.loc,
@@ -119,9 +146,9 @@ def main(**opts: tp.Any) -> None:
     """
 
 
-@main.command()
+@main.command(name="newkey")
 @base_command
-def newkey(**opts: tp.Any) -> None:
+def cmd_newkey(**opts: tp.Any) -> None:
     """
     Generate a new master key
     """
@@ -150,7 +177,7 @@ def read_validate_blob(
     return result
 
 
-@main.command()
+@main.command(name="read")
 @base_command
 @click.option(
     "--allow-errors/--disallow-errors",
@@ -165,7 +192,7 @@ def read_validate_blob(
     + "directory used as the current working directory for running the command.",
 )
 @click.argument("cmd", nargs=-1)
-def read(**opts: tp.Any) -> None:
+def cmd_read(**opts: tp.Any) -> None:
     """
     Read blobs and execute given command.
     Note: to pass any options to the command, prepend it with "--".
@@ -197,3 +224,26 @@ def read(**opts: tp.Any) -> None:
 
         if rc:
             sys.exit(rc)
+
+
+@main.group(name="backends")
+def cmd_backends(**opts: tp.Any) -> None:
+    """
+    Provide info about available backends.
+    """
+
+
+@cmd_backends.command(name="list")
+def cmd_backends_list(**opts: tp.Any) -> None:
+    """
+    List available backends.
+    """
+    for i, j in sorted(backends.list_backends().items()):
+        for k in sorted(j):
+            click.echo(f"{i}: {k}")
+
+
+@cmd_backends.command(name="info")
+def cmd_backends_info(**opts: tp.Any) -> None:
+    """
+    """

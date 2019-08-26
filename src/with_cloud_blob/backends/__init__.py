@@ -16,6 +16,13 @@ def _backends() -> _tp.Dict[str, _tp.Dict[str, _tp.Callable[[], _tp.Any]]]:
     }
 
 
+def list_backends() -> _tp.Dict[str, _tp.List[str]]:
+    return {
+        i: list(j)
+        for i, j in _backends().items()
+    }
+
+
 @_functools.lru_cache()
 def storage_backend(name: str) -> intf.IStorageBackend:
     try:

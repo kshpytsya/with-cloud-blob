@@ -2,25 +2,12 @@ import pathlib
 import typing as tp
 
 import atomicwrites
-import filelock
 import implements
 import with_cloud_blob.backend_intf as intf
 
 
-@implements.implements(intf.ILockBackend)
-class LockBackend:
-    @staticmethod
-    def make_lock(
-        *,
-        loc: str,
-        opts: intf.Options,
-    ) -> tp.ContextManager[tp.Any]:
-        intf.check_unknown_options(opts)
-        return filelock.FileLock(loc + ".lock")
-
-
 @implements.implements(intf.IStorageBackend)
-class StorageBackend:
+class Backend:
     @staticmethod
     def modify(
         *,
@@ -28,8 +15,7 @@ class StorageBackend:
         modifier: intf.StorageModifier,
         opts: intf.Options,
     ) -> None:
-        intf.check_unknown_options(opts)
-
+        opts.fail_on_unused()
         path = pathlib.Path(loc)
         data: tp.Optional[bytes]
         if path.exists():
@@ -52,8 +38,7 @@ class StorageBackend:
         loc: str,
         opts: intf.Options,
     ) -> bytes:
-        intf.check_unknown_options(opts)
-
+        opts.fail_on_unused()
         try:
             return pathlib.Path(loc).read_bytes()
         except OSError as e:
