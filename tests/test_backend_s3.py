@@ -1,8 +1,6 @@
 import io
-import time
 import typing as tp
 
-import boto3
 import botocore
 import pytest
 import with_cloud_blob.backend_intf as intf
@@ -11,51 +9,8 @@ import with_cloud_blob.backends.storage_s3
 
 DATA = b"\x00\x80\xff\xf0\xc2\x80"
 DATA = b"abcd"
-DYNAMODB_ENDPOINT = "http://localhost:8770"
-ENDPOINT = "http://localhost:8771"
 
 storage_backend = tp.cast(intf.IStorageBackend, with_cloud_blob.backends.storage_s3.Backend)
-
-
-@pytest.fixture
-def s3_bucket() -> tp.Any:
-    name = f"with-cloud-blob-test-{time.time_ns()}"
-    session = boto3.Session()
-    s3 = session.resource("s3", endpoint_url=ENDPOINT)
-    bucket = s3.Bucket(name)
-    bucket.create()
-    try:
-        yield bucket
-    finally:
-        bucket.objects.all().delete()
-        bucket.delete()
-
-
-@pytest.fixture
-def s3_read_options() -> tp.Generator[intf.Options, None, None]:
-    opts = intf.Options(
-        {
-            "endpoint": ENDPOINT,
-        },
-    )
-    yield opts
-    opts.fail_on_unused()
-
-
-@pytest.fixture
-def s3_modify_options(delay_put: int) -> tp.Generator[intf.Options, None, None]:
-    opts = intf.Options(
-        {
-            "endpoint": ENDPOINT,
-            "dynamodb_endpoint": DYNAMODB_ENDPOINT,
-            "region": "us-east-1",
-            "_delay_put": str(delay_put),
-            "max_lag": str(max(1, delay_put * 3)),
-            "dynamodb_table": f"with-cloud-blob-test-{time.time_ns()}",
-        },
-    )
-    yield opts
-    opts.fail_on_unused()
 
 
 def read_s3_obj(s3_bucket: tp.Any, key: str) -> bytes:

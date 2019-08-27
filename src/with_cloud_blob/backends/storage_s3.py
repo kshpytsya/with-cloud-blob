@@ -135,6 +135,7 @@ class Backend:
         # delay_put is used simulate eventual consistency of S3 in tests
         delay_put = float(opts.get("_delay_put") or "0")
         max_lag = int(opts.get("max_lag") or "30")
+        lag_retry_period = float(opts.get("lag_retry_period") or "1")
 
         if max_lag:
             dynamo = _DynamoDbKeyValueStore(session, opts, ttl=max_lag)
@@ -142,7 +143,7 @@ class Backend:
             if expected_digest is None:
                 attempts = 1
             else:
-                attempts = max_lag
+                attempts = int(max_lag / lag_retry_period) + 1
         else:
             attempts = 1
 
@@ -174,7 +175,7 @@ class Backend:
                 if got_digest == expected_digest:
                     break
 
-            time.sleep(1)
+                time.sleep(lag_retry_period)
 
         new_data = modifier(data)
 

@@ -52,7 +52,11 @@ class Backend:
         lock_client = dlock.DynamoDBLockClient(dynamodb_resource)
         opts.fail_on_unused()
 
-        # TODO cleate table
+        try:
+            dlock.DynamoDBLockClient.create_dynamodb_table(dynamodb_resource.meta.client)
+        except dynamodb_resource.meta.client.exceptions.ResourceInUseException:
+            # table already exists
+            pass
 
         return _Lock(
             lock_client=lock_client,

@@ -25,4 +25,4 @@ def build(ctx):
 
 @task
 def test(ctx):
-    ctx.run("tox")
+    ctx.run("tox -- -v --timeout=120 --durations=5")

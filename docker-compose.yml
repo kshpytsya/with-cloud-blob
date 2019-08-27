@@ -1,10 +1,11 @@
-version: '3.7'
+version: '2.4'
 services:
   dynamodb:
     image: amazon/dynamodb-local:1.11.477
     ports:
     - '8770:8000'
     command: -Djava.library.path=./DynamoDBLocal_lib -jar DynamoDBLocal.jar -delayTransientStatuses
+    mem_limit: 512m
   minio:
     image: minio/minio:RELEASE.2019-08-14T20-37-41Z
     environment:
