@@ -7,11 +7,11 @@ import common
 import nacl.secret
 import nacl.utils
 import pytest
-from with_cloud_blob._cli import main
+from with_cloud_blob._cli import root
 
 
 def cli(args: tp.List[str]) -> None:
-    main(args, standalone_mode=False)
+    root(args, standalone_mode=False)
 
 
 def test_empty() -> None:
@@ -68,6 +68,7 @@ def test_read(
             + ["--"]
             + cmd,
         )
+        assert expected_rc == 0
     except SystemExit as e:
         assert e.code == expected_rc
 
@@ -103,6 +104,50 @@ def test_backends_list(
     assert "storage: file" in lines
 
 
+@pytest.mark.parametrize(
+    "start_state,tasks",
+    [
+        (None, [("true", 0, None)]),
+        (None, [("false", 1, None)]),
+        ("", [("true", 0, "")]),
+        ("", [("false", 1, "")]),
+        ("data", [("true", 0, "data")]),
+        ("data", [("false", 1, "data")]),
+        (None, [("touch blob", 0, "")]),
+        (
+            None, [
+                ("rm blob", 1, None),
+                ("echo -ne a >> blob", 0, "a"),
+                ("echo -ne b >> blob", 0, "ab"),
+                ("rm blob", 0, None),
+                ("rm blob", 1, None),
+            ],
+        ),
+    ],
+)
+def test_modify(
+    tmp_path: pathlib.Path,
+    start_state: tp.Optional[str],
+    tasks: tp.List[tp.Tuple[str, int, tp.Optional[str]]],
+) -> None:
+    file1 = tmp_path / "file1"
+
+    if start_state is not None:
+        file1.write_text(start_state)
+
+    for cmd, expected_rc, expected_state in tasks:
+        try:
+            cli(["modify", f":file:{file1}", "--", "bash", "-c", cmd])
+            assert expected_rc == 0
+        except SystemExit as e:
+            assert e.code == expected_rc
+
+        if expected_state is None:
+            assert not file1.exists()
+        else:
+            assert file1.read_text() == expected_state
+
+
 def _test_parallel_modify(
     *,
     tmp_path: pathlib.Path,
@@ -133,17 +178,16 @@ def _test_parallel_modify(
 
 
 @pytest.mark.parametrize(
-    "count,jobs,args",
+    "count,jobs",
     [
-        (10, 1, ["--lock", ":file:@f", ":file:@f"]),
-        (100, 10, ["--lock", ":file:@f", ":file:@f"]),
+        (10, 1),
+        (100, 10),
     ],
 )
 def test_parallel_modify_file(
     tmp_path: pathlib.Path,
     count: int,
     jobs: int,
-    args: tp.List[str],
 ) -> None:
     file1 = tmp_path / "file1"
 
@@ -151,7 +195,7 @@ def test_parallel_modify_file(
         tmp_path=tmp_path,
         count=count,
         jobs=jobs,
-        args=[j.replace("@f", str(file1)) for j in args],
+        args=["--lock", f":file:{file1}:timeout=5", f":file:{file1}"],
     )
 
 
@@ -174,20 +218,24 @@ def test_parallel_modify_s3_dynamodb(
     lock: str,
     delay_put: float,
 ) -> None:
+    s3_name = f"{s3_bucket.name}/file1"
+
     if lock == "file":
-        file1 = tmp_path / "file1"
+        file1 = tmp_path / f"file1"
         lock_loc = f"|file|{file1}"
     elif lock == "dynamodb":
-        lock_loc = f"|dynamodb|{s3_bucket.name}/file1|dynamodb_endpoint={common.DYNAMODB_ENDPOINT}|region=us-east-1"
+        lock_loc = f"|dynamodb|{s3_name}|dynamodb_endpoint={common.DYNAMODB_ENDPOINT}|region=us-east-1"
     else:
         assert 0
+
+    lock_loc += "|timeout=15"
 
     s3_opts = common.s3_modify_options_dict(delay_put=delay_put)
     # s3_opts["max_lag"] = "0"
     # s3_opts.pop("dynamodb_endpoint", None)
     # s3_opts.pop("dynamodb_table", None)
 
-    s3_loc = f"|s3|{s3_bucket.name}/file1" + "".join(f"|{k}={v}" for k, v in s3_opts.items())
+    s3_loc = f"|s3|{s3_name}" + "".join(f"|{k}={v}" for k, v in s3_opts.items())
 
     _test_parallel_modify(
         tmp_path=tmp_path,

@@ -9,28 +9,19 @@ import typing as tp
 from dataclasses import dataclass
 
 import click
+import click_log
 import nacl.secret
 import nacl.utils
 
 from . import backend_intf
 from . import backends
-# import logging
-# import click_log
+from ._log import logger
 # import jsonschema
-
-# logger = logging.getLogger(__name__)
-# click_log.basic_config(logger)
-
 
 # TODO sys exit code range
 # TODO extrypoints conditional on extras
-# TODO call error() for click exceptions
 # TODO proper errors on str to int/float casts
 # TODO test: time before lock timeout exception is approximately equal to requested timeout
-
-
-def error(s: str) -> None:
-    click.secho(f"error: {s}", err=True, fg="red")
 
 
 def tempdir() -> tp.ContextManager[str]:
@@ -55,7 +46,7 @@ def parse_locator(s: str) -> Locator:
     fields = s.split(delim)
     if len(fields) < 3:
         raise click.BadParameter(
-            "must contain at least two fields separated by delimiter defined "
+            "must contain at least two fields separated by a delimiter defined "
             "by the first character in the string",
         )
 
@@ -69,6 +60,14 @@ def parse_locator(s: str) -> Locator:
     )
 
 
+def short_locator_descr(loc: Locator) -> str:
+    for delim in ":~!@#$%^&*()_-+=[{}]\\|;'\"<>,.?/":
+        if delim not in loc.backend and delim not in loc.loc:
+            return f"{delim}{loc.backend}{delim}{loc.loc}"
+
+    return f"{loc.backend} {loc.loc}"
+
+
 def modify_blob_with_locks(
     *,
     storage: Locator,
@@ -77,8 +76,11 @@ def modify_blob_with_locks(
     first_timeout: float,
     timeout_step: float,
 ) -> None:
-    storage_backend = backends.storage_backend(storage.backend)
-    lock_backends = [backends.lock_backend(lock.backend) for lock in locks]
+    try:
+        storage_backend = backends.storage_backend(storage.backend)
+        lock_backends = [backends.lock_backend(lock.backend) for lock in locks]
+    except backend_intf.BackendError as e:
+        raise click.ClickException(str(e))
 
     with contextlib.ExitStack() as es:
         for lock_backend, lock in zip(lock_backends, locks):
@@ -86,7 +88,8 @@ def modify_blob_with_locks(
             total_timeout = float(lock.opts.get("timeout") or "0")
             deadline = time.time() + total_timeout
 
-            lock_descr = f"{lock.backend}:{lock.loc}"
+            lock.loc = loc_prefix + (lock.loc or storage.loc)
+            lock_descr = short_locator_descr(lock)
 
             attempt = 0
 
@@ -98,26 +101,32 @@ def modify_blob_with_locks(
                 else:
                     try:
                         if attempt > 0:
-                            click.echo("waiting for lock {lock_descr}, deadline in {remaining:1.1f}s", err=True)
+                            logger.info(lambda: f"waiting for lock {lock_descr}, deadline in {remaining:1.1f}s")
+
+                        attempt += 1
 
                         es.enter_context(
                             lock_backend.make_lock(
-                                loc=loc_prefix + (lock.loc or storage.loc),
+                                loc=lock.loc,
                                 opts=lock.opts,
-                                timeout=max(0, min(remaining, timeout_step if attempt > 0 else first_timeout)),
+                                timeout=max(0, min(remaining, timeout_step if attempt > 1 else first_timeout)),
                             ),
                         )
-                        attempt += 1
                     except backend_intf.TimeoutError:
                         continue
+                    except backend_intf.BackendError as e:
+                        raise click.ClickException(f"{lock_descr}: {e}")
 
                 break
 
-        storage_backend.modify(
-            loc=storage.loc,
-            opts=storage.opts,
-            modifier=modifier,
-        )
+        try:
+            storage_backend.modify(
+                loc=storage.loc,
+                opts=storage.opts,
+                modifier=modifier,
+            )
+        except backend_intf.BackendError as e:
+            raise click.ClickException(f"{short_locator_descr(storage)}: {e}")
 
 
 # class PathType(click.Path):
@@ -134,21 +143,32 @@ def click_wrapper(wrapper: tp.Callable[..., None], wrapped: tp.Callable[..., Non
 
 
 def base_command(func: tp.Callable[..., None]) -> tp.Callable[..., None]:
-    # @click_log.simple_verbosity_option(logger)  # type: ignore
+    @click_log.simple_verbosity_option(logger, show_default=True)  # type: ignore
     def wrapper(**opts: tp.Any) -> None:
         func(**opts)
 
     return click_wrapper(wrapper, func)
 
 
+def main() -> None:
+    try:
+        root(standalone_mode=False)
+    except click.ClickException as e:
+        logger.error(e.format_message())
+        sys.exit(1)
+    except click.exceptions.Abort:
+        logger.error("aborted")
+        sys.exit(1)
+
+
 @click.group()
 @click.version_option()
-def main(**opts: tp.Any) -> None:
+def root(**opts: tp.Any) -> None:
     """
     """
 
 
-@main.command(name="newkey")
+@root.command(name="newkey")
 @base_command
 def cmd_newkey(**opts: tp.Any) -> None:
     """
@@ -174,7 +194,7 @@ def modify_validate_blob(
     return parse_locator(value)
 
 
-@main.command(name="modify")
+@root.command(name="modify")
 @base_command
 @click.option(
     "--lock",
@@ -222,10 +242,13 @@ def cmd_modify(**opts: tp.Any) -> None:
             if blob is not None:
                 blob_path.write_bytes(blob)
 
-            rc = subprocess.call(
-                [opts["command"]] + list(opts["command_args"]),
-                cwd=td,
-            )
+            try:
+                rc = subprocess.call(
+                    [opts["command"]] + list(opts["command_args"]),
+                    cwd=td,
+                )
+            except Exception as e:
+                raise click.ClickException(str(e))
 
             if rc:
                 sys.exit(rc)
@@ -265,7 +288,7 @@ def read_validate_blob(
     return result
 
 
-@main.command(name="read")
+@root.command(name="read")
 @base_command
 @click.option(
     "--allow-errors/--disallow-errors",
@@ -301,22 +324,25 @@ def cmd_read(**opts: tp.Any) -> None:
                 )
                 tdp.joinpath(name).write_bytes(data)
             except backend_intf.BackendError as e:
-                error(str(e))
+                logger.error(f"{short_locator_descr(loc)}: {e}")
                 errors = True
 
             if errors and not opts["allow_errors"]:
                 sys.exit(1)
 
-        rc = subprocess.call(
-            [opts["command"]] + list(opts["command_args"]),
-            cwd=td,
-        )
+        try:
+            rc = subprocess.call(
+                [opts["command"]] + list(opts["command_args"]),
+                cwd=td,
+            )
+        except Exception as e:
+            raise click.ClickException(str(e))
 
         if rc:
             sys.exit(rc)
 
 
-@main.group(name="backends")
+@root.group(name="backends")
 def cmd_backends(**opts: tp.Any) -> None:
     """
     Provide info about available backends.

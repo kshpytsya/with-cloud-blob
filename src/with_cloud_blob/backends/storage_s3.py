@@ -1,3 +1,4 @@
+import binascii
 import hashlib
 import io
 import threading
@@ -9,6 +10,7 @@ import implements
 import with_cloud_blob.backend_intf as intf
 
 from . import _boto_helpers as bh
+from .._log import logger
 
 
 class _BucketKey:
@@ -82,9 +84,10 @@ class _DynamoDbKeyValueStore:
             if status == "ACTIVE":
                 break
             else:
+                logger.debug(lambda: f"waiting for {self._table_name} dynamodb table to become active")
                 time.sleep(1)
 
-    def get(self, key: str) -> tp.Optional[str]:
+    def get(self, key: str) -> tp.Optional[bytes]:
         self._ensure_table()
         response = self._table.get_item(
             Key={"key": key},
@@ -92,7 +95,7 @@ class _DynamoDbKeyValueStore:
         )
         item = response.get("Item")
         if item and item["expiry_time"] > time.time():
-            return tp.cast(str, item["value"].value)
+            return tp.cast(bytes, item["value"].value)
         else:
             return None
 
@@ -120,6 +123,10 @@ def _digest(data: tp.Optional[bytes]) -> bytes:
     return hashlib.sha1(data).digest()
 
 
+def _bytes2hex(s: bytes) -> str:
+    return binascii.hexlify(s).decode()
+
+
 @implements.implements(intf.IStorageBackend)
 class Backend:
     @staticmethod
@@ -129,78 +136,89 @@ class Backend:
         modifier: intf.StorageModifier,
         opts: intf.Options,
     ) -> None:
-        session = bh.boto_session(opts)
-        s3 = bh.boto_resource_s3(session, opts)
+        try:
+            session = bh.boto_session(opts)
+            s3 = bh.boto_resource_s3(session, opts)
 
-        # delay_put is used simulate eventual consistency of S3 in tests
-        delay_put = float(opts.get("_delay_put") or "0")
-        max_lag = int(opts.get("max_lag") or "30")
-        lag_retry_period = float(opts.get("lag_retry_period") or "1")
-
-        if max_lag:
-            dynamo = _DynamoDbKeyValueStore(session, opts, ttl=max_lag)
-            expected_digest = dynamo.get(loc)
-            if expected_digest is None:
-                attempts = 1
-            else:
-                attempts = int(max_lag / lag_retry_period) + 1
-        else:
-            attempts = 1
-
-        bk = _BucketKey(loc)
-        opts.fail_on_unused()
-
-        bucket = s3.Bucket(bk.bucket)
-
-        for attempt in range(attempts):
-            with io.BytesIO() as f:
-                try:
-                    bucket.download_fileobj(bk.key, f)
-                    data: tp.Optional[bytes] = f.getvalue()
-                except botocore.exceptions.ClientError as e:
-                    try:
-                        s3.meta.client.head_bucket(Bucket=bk.bucket)
-                    except botocore.exceptions.ClientError as e2:
-                        raise intf.BackendError(f"accessing bucket: {e2}")
-
-                    if e.response["Error"]["Code"] == "404":
-                        data = None
-                    else:
-                        raise intf.BackendError(e)
-                except botocore.exceptions.BotoCoreError as e:
-                    raise intf.BackendError(e)
+            # delay_put is used simulate eventual consistency of S3 in tests
+            delay_put = float(opts.get("_delay_put") or "0")
+            max_lag = int(opts.get("max_lag") or "30")
+            lag_retry_period = float(opts.get("lag_retry_period") or "1")
 
             if max_lag:
-                got_digest = _digest(data)
-                if got_digest == expected_digest:
-                    break
-
-                time.sleep(lag_retry_period)
-
-        new_data = modifier(data)
-
-        if new_data != data:
-            if max_lag:
-                new_digest = _digest(new_data)
-                dynamo.put(loc, new_digest)
-
-            def action(bucket: tp.Any) -> None:
-                if new_data is None:
-                    bucket.Object(bk.key).delete()
+                dynamo = _DynamoDbKeyValueStore(session, opts, ttl=max_lag)
+                expected_digest = dynamo.get(loc)
+                if expected_digest is None:
+                    attempts = 1
                 else:
-                    bucket.put_object(Key=bk.key, Body=new_data)
-
-            def postponed() -> None:
-                time.sleep(delay_put)
-                session = bh.boto_session(opts)
-                s3 = bh.boto_resource_s3(session, opts)
-                bucket = s3.Bucket(bk.bucket)
-                action(bucket)
-
-            if delay_put:
-                threading.Thread(target=postponed, daemon=True).start()
+                    attempts = int(max_lag / lag_retry_period) + 1
+                    logger.debug(
+                        lambda: f"will make {attempts} attempts {lag_retry_period:1.1f}s each "
+                        f"waiting for digest {_bytes2hex(expected_digest)}",
+                    )
             else:
-                action(bucket)
+                attempts = 1
+
+            bk = _BucketKey(loc)
+            opts.fail_on_unused()
+
+            bucket = s3.Bucket(bk.bucket)
+
+            for attempt in range(attempts):
+                with io.BytesIO() as f:
+                    try:
+                        bucket.download_fileobj(bk.key, f)
+                        data: tp.Optional[bytes] = f.getvalue()
+                    except botocore.exceptions.ClientError as e:
+                        try:
+                            s3.meta.client.head_bucket(Bucket=bk.bucket)
+                        except botocore.exceptions.ClientError as e2:
+                            raise intf.BackendError(f"accessing bucket: {e2}")
+
+                        if e.response["Error"]["Code"] == "404":
+                            data = None
+                        else:
+                            raise intf.BackendError(e)
+                    except botocore.exceptions.BotoCoreError as e:
+                        raise intf.BackendError(e)
+
+                if max_lag:
+                    got_digest = _digest(data)
+                    if got_digest == expected_digest:
+                        break
+
+                    logger.debug(lambda: f"attemp {attempt}, got digest {_bytes2hex(got_digest)}")
+                    time.sleep(lag_retry_period)
+
+            new_data = modifier(data)
+
+            if new_data != data:
+                if max_lag:
+                    new_digest = _digest(new_data)
+                    dynamo.put(loc, new_digest)
+
+                def action(bucket: tp.Any) -> None:
+                    if new_data is None:
+                        bucket.Object(bk.key).delete()
+                    else:
+                        bucket.put_object(Key=bk.key, Body=new_data)
+
+                def postponed() -> None:
+                    time.sleep(delay_put)
+                    session = bh.boto_session(opts)
+                    s3 = bh.boto_resource_s3(session, opts)
+                    bucket = s3.Bucket(bk.bucket)
+                    action(bucket)
+
+                if delay_put:
+                    threading.Thread(target=postponed, daemon=True).start()
+                else:
+                    action(bucket)
+
+        except botocore.exceptions.ClientError as e:
+            raise intf.BackendError(e)
+        except botocore.exceptions.BotoCoreError as e:
+            raise intf.BackendError(e)
 
     @staticmethod
     def load(
@@ -208,18 +226,19 @@ class Backend:
         loc: str,
         opts: intf.Options,
     ) -> bytes:
-        session = bh.boto_session(opts)
-        s3 = bh.boto_resource_s3(session, opts)
-        opts.fail_on_unused()
-        bk = _BucketKey(loc)
+        try:
+            session = bh.boto_session(opts)
+            s3 = bh.boto_resource_s3(session, opts)
+            opts.fail_on_unused()
+            bk = _BucketKey(loc)
 
-        bucket = s3.Bucket(bk.bucket)
-        with io.BytesIO() as f:
-            try:
+            bucket = s3.Bucket(bk.bucket)
+
+            with io.BytesIO() as f:
                 bucket.download_fileobj(bk.key, f)
-            except botocore.exceptions.ClientError as e:
-                raise intf.BackendError(e)
-            except botocore.exceptions.BotoCoreError as e:
-                raise intf.BackendError(e)
+                return f.getvalue()
 
-            return f.getvalue()
+        except botocore.exceptions.ClientError as e:
+            raise intf.BackendError(e)
+        except botocore.exceptions.BotoCoreError as e:
+            raise intf.BackendError(e)
