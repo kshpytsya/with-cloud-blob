@@ -18,7 +18,6 @@ from . import backends
 from ._log import logger
 # import jsonschema
 
-# TODO sys exit code range
 # TODO extrypoints conditional on extras
 # TODO proper errors on str to int/float casts
 # TODO test: time before lock timeout exception is approximately equal to requested timeout
@@ -142,8 +141,30 @@ def click_wrapper(wrapper: tp.Callable[..., None], wrapped: tp.Callable[..., Non
     return result
 
 
+g_own_errors_error_code = 1
+
+
 def base_command(func: tp.Callable[..., None]) -> tp.Callable[..., None]:
+    def error_code_cb(
+        ctx: tp.Any,
+        param: tp.Any,
+        value: int,
+    ) -> int:
+        global g_own_errors_error_code
+        g_own_errors_error_code = value
+        return value
+
     @click_log.simple_verbosity_option(logger, show_default=True)  # type: ignore
+    @click.option(
+        "--error-code",
+        default=1,
+
+        # callback is used to be able to return custom error code even in case of
+        # errors in parsing remaining options
+        callback=error_code_cb,
+        help="Code to return in case of own errors.",
+        show_default=True,
+    )
     def wrapper(**opts: tp.Any) -> None:
         func(**opts)
 
@@ -155,10 +176,10 @@ def main() -> None:
         root(standalone_mode=False)
     except click.ClickException as e:
         logger.error(e.format_message())
-        sys.exit(1)
+        sys.exit(g_own_errors_error_code)
     except click.exceptions.Abort:
         logger.error("aborted")
-        sys.exit(1)
+        sys.exit(g_own_errors_error_code)
 
 
 @click.group()
