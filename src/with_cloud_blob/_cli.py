@@ -101,7 +101,7 @@ def modify_blob_with_locks(
                 else:
                     try:
                         if attempt > 0:
-                            logger.info(lambda: f"waiting for lock {lock_descr}, deadline in {remaining:1.1f}s")
+                            logger.info(lambda: f"waiting for lock {lock_descr}, deadline in {remaining:1.0f}s")
 
                         attempt += 1
 
