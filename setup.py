@@ -14,6 +14,7 @@ setup(
     use_scm_version=True,
     python_requires=">=3.7, <3.8",
     packages=find_packages(where="src"),
+    package_data={"with_cloud_blob": ["*_schemas.json"]},
     package_dir={"": "src"},
     entry_points={
         "console_scripts": ["with-cloud-blob = with_cloud_blob._cli:main"],
@@ -49,11 +50,10 @@ setup(
         "boto3>=1.9.210,<2",
         "click>=7.0,<8",
         "click-log>=0.3.2,<1",
+        "fastavro>=0.22.5,<1",
         "filelock>=3.0.8,<4",
         "implements>=0.1.4,<1",
-        "jsonschema>=3.0.2,<4",
         "pynacl>=1.3.0,<2",
         "python_dynamodb_lock>=0.9.1,<1",
-        "py-ubjson>=0.14.0,<1",
     ],
 )

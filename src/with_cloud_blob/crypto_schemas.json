@@ -1,0 +1,85 @@
+{
+  "blob_header": "int",
+  "bytes_array": {"type": "array", "items": "bytes"},
+  "blob.1":
+  {
+    "type": "record",
+    "fields":
+    [
+      {"name": "max_id", "type": "int"},
+      {"name": "partitions", "type": {"type": "array", "items": "bytes"}},
+      {"name": "master", "type": "bytes"},
+      {
+        "name": "tenants",
+        "type":
+        {
+          "type": "map",
+          "values": "bytes"
+        }
+      }
+    ]
+  },
+  "partition.1": "*bytes_array",
+  "files.1":
+  {
+    "type": "map",
+    "values":
+    {
+      "type": "record",
+      "name": "file",
+      "fields":
+      [
+        {"name": "mtime_ns", "type": "int"},
+        {"name": "partition_id", "type": "int"},
+        {"name": "body_id", "type": "int"}
+      ]
+    }
+  },
+  "master.1":
+  {
+    "type": "record",
+    "fields":
+    [
+      {"name": "partition_keys", "type": "*bytes_array"},
+      {
+        "name": "files",
+        "type":
+        {
+          "type": "map",
+          "values": "*files.1"
+        }
+      },
+      {
+        "name": "tenants_keys",
+        "type":
+        {
+          "type": "array",
+          "items":
+          {
+            "type": "record",
+            "name": "tenant",
+            "fields":
+            [
+              {"name": "tenant_name", "type": "string"},
+              {"name": "key_id", "type": "int"},
+              {"name": "writer_key", "type": "bytes"},
+              {"name": "reader_key", "type": "bytes"}
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "tenant.1":
+  {
+    "type": "record",
+    "fields":
+    [
+      {"name": "partition_keys", "type": "*bytes_array"},
+      {
+        "name": "files",
+        "type": "*files.1"
+      }
+    ]
+  }
+}

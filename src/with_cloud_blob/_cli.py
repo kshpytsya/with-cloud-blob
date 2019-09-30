@@ -10,13 +10,12 @@ from dataclasses import dataclass
 
 import click
 import click_log
-import nacl.secret
-import nacl.utils
+import nacl.encoding
 
+from . import _crypto
 from . import backend_intf
 from . import backends
 from ._log import logger
-# import jsonschema
 
 # TODO extrypoints conditional on extras
 # TODO proper errors on str to int/float casts
@@ -65,6 +64,24 @@ def short_locator_descr(loc: Locator) -> str:
             return f"{delim}{loc.backend}{delim}{loc.loc}"
 
     return f"{loc.backend} {loc.loc}"
+
+
+@dataclass
+class ReaderKey:
+    key_id: int
+    key: bytes
+
+
+def parse_reader_key(s: str) -> ReaderKey:
+    fields = s.split(":")
+
+    if len(fields) != 2:
+        raise click.BadParameter("must contain two fields delimitered by colon")
+
+    return ReaderKey(
+        key_id=int(fields[0]),
+        key=nacl.encoding.HexEncoder.decode(fields[1]),
+    )
 
 
 def modify_blob_with_locks(
@@ -195,7 +212,7 @@ def cmd_newkey(**opts: tp.Any) -> None:
     """
     Generate a new master key.
     """
-    key = nacl.utils.random(nacl.secret.SecretBox.KEY_SIZE)
+    key = _crypto.new_key()
     sys.stdout.buffer.write(nacl.encoding.HexEncoder.encode(key))
 
 
@@ -215,34 +232,42 @@ def modify_validate_blob(
     return parse_locator(value)
 
 
+def modify_command(func: tp.Callable[..., None]) -> tp.Callable[..., None]:
+    @base_command
+    @click.option(
+        "--lock",
+        multiple=True,
+        callback=modify_validate_lock,
+        metavar="<lock-locator>",
+        help="Locator of a lock to hold while executing <command>. May be specified multiple times.",
+    )
+    @click.option(
+        "--first-timeout",
+        default=10.0,
+        metavar="<T>",
+        help="Time in seconds to silently wait for each lock before starting to periodic reports.",
+        show_default=True,
+    )
+    @click.option(
+        "--timeout-step",
+        default=30.0,
+        metavar="<T>",
+        help="Time in seconds between periodic reports about waiting for lock acquisition.",
+        show_default=True,
+    )
+    @click.argument(
+        "blob",
+        callback=modify_validate_blob,
+    )
+    def wrapper(**opts: tp.Any) -> None:
+        func(**opts)
+
+    return click_wrapper(wrapper, func)
+
+
 @root.command(name="modify")
-@base_command
-@click.option(
-    "--lock",
-    multiple=True,
-    callback=modify_validate_lock,
-    metavar="<lock-locator>",
-    help="Locator of a lock to hold while executing <command>. May be specified multiple times.",
-)
-@click.option(
-    "--first-timeout",
-    default=10.0,
-    metavar="<T>",
-    help="Time in seconds to silently wait for each lock before starting to periodic reports.",
-    show_default=True,
-)
-@click.option(
-    "--timeout-step",
-    default=30.0,
-    metavar="<T>",
-    help="Time in seconds between periodic reports about waiting for lock acquisition.",
-    show_default=True,
-)
-@click.argument(
-    "blob",
-    callback=modify_validate_blob,
-)
-@click.argument("command", nargs=1)
+@modify_command
+@click.argument("command", nargs=1, metavar="-- COMMAND")
 @click.argument("command_args", metavar="[ARGS]...", nargs=-1)
 def cmd_modify(**opts: tp.Any) -> None:
     """
@@ -288,6 +313,147 @@ def cmd_modify(**opts: tp.Any) -> None:
     )
 
 
+def xmodify_validate_key(
+    ctx: tp.Any,
+    param: tp.Any,
+    value: str,
+) -> bytes:
+    try:
+        return tp.cast(bytes, nacl.encoding.HexEncoder.decode(value))
+    except Exception as e:
+        raise click.BadParameter(str(e))
+
+
+@root.command(name="xmodify")
+@modify_command
+@click.argument(
+    "key",
+    callback=xmodify_validate_key,
+)
+@click.argument("command", nargs=1, metavar="-- COMMAND")
+@click.argument("command_args", metavar="[ARGS]...", nargs=-1)
+def cmd_xmodify(**opts: tp.Any) -> None:
+    """
+    Modify encrypted blob.
+
+    Read <blob>, decrypt it with master <key>, execute given <command>, and, in case of success, update <blob>.
+    Note: to pass any options to the command, prepend it with "--".
+    If <blob> exists, its contents will be accessible as files in the current working directory
+    for the command. Files in 'master' subdirectory are accessible only using 'xmodify' command.
+    Files in 'tenants/<name>/' are also accessible with 'read --xblob' command with reader key
+    obtainable using 'xgetkeys' command.
+    If command deletes 'master' directory, <blob> will be deleted.
+    If command deletes any of '.keep-tenant-key-<name>' or 'tenants/<name>/', existing reader keys for correcponding
+    tenants will be forgotten, and new ones will be generated as necessary.
+    """
+
+    def modifier(blob: tp.Optional[bytes]) -> tp.Optional[bytes]:
+        with tempdir() as td:
+            tdp = pathlib.Path(td)
+
+            if blob is not None:
+                cb = _crypto.CryptoBlob()
+                cb.load_from_blob(blob)
+
+                master_data = cb.unseal_master(opts["key"])
+                cb.writeout_master(master_data, tdp)
+                existing_tenants_keys = {i.tenant_name: i for i in cb.get_tenants_keys(master_data)}
+                keep_keys_paths = {i: tdp.joinpath(f".keep-tenant-key-{i}") for i in existing_tenants_keys}
+            else:
+                existing_tenants_keys = {}
+                keep_keys_paths = {}
+
+            for k, v in keep_keys_paths.items():
+                v.touch()
+
+            try:
+                rc = subprocess.call(
+                    [opts["command"]] + list(opts["command_args"]),
+                    cwd=td,
+                )
+            except Exception as e:
+                raise click.ClickException(str(e))
+
+            if rc:
+                sys.exit(rc)
+
+            master_path = tdp / "master"
+
+            if master_path.exists():
+                for k, v in keep_keys_paths.items():
+                    if v.exists():
+                        v.unlink()
+                    else:
+                        existing_tenants_keys.pop(k)
+
+                cb.collect(
+                    tdp,
+                    master_key=opts["key"],
+                    existing_tenants_keys=existing_tenants_keys.values(),
+                )
+                return cb.dump_to_blob()
+            else:
+                return None
+
+    modify_blob_with_locks(
+        storage=opts["blob"],
+        locks=opts["lock"],
+        modifier=modifier,
+        first_timeout=opts["first_timeout"],
+        timeout_step=opts["timeout_step"],
+    )
+
+
+@root.command(name="xgetkeys")
+@modify_command
+@click.argument(
+    "key",
+    callback=xmodify_validate_key,
+)
+@click.argument("tenants", metavar="[TENANT]...", nargs=-1)
+def cmd_xgetkeys(**opts: tp.Any) -> None:
+    """
+    Get tenants keys.
+
+    Read <blob>, decrypt it with master <key>, get keys for specified tenants.
+    """
+
+    # modifier access semantics is use to do consistent read
+
+    def modifier(blob: tp.Optional[bytes]) -> tp.Optional[bytes]:
+        if blob is not None:
+            cb = _crypto.CryptoBlob()
+            cb.load_from_blob(blob)
+
+            master_data = cb.unseal_master(opts["key"])
+            tenants_keys = {i.tenant_name: i for i in cb.get_tenants_keys(master_data)}
+        else:
+            tenants_keys = {}
+
+        for i in opts["tenants"]:
+            tenant_keys = tenants_keys.get(i)
+
+            if not tenant_keys:
+                raise click.BadParameter(f"unknow tenant {i}")
+
+            sys.stdout.write(
+                "{}:{}\n".format(
+                    tenant_keys.key_id,
+                    nacl.encoding.HexEncoder.encode(tenant_keys.reader_key).decode(),
+                ),
+            )
+
+        return blob
+
+    modify_blob_with_locks(
+        storage=opts["blob"],
+        locks=opts["lock"],
+        modifier=modifier,
+        first_timeout=opts["first_timeout"],
+        timeout_step=opts["timeout_step"],
+    )
+
+
 def read_validate_blob(
     ctx: tp.Any,
     param: tp.Any,
@@ -318,32 +484,80 @@ def read_validate_blob(
 @click.option(
     "--blob",
     multiple=True,
-    callback=read_validate_blob,
     metavar="<name>=<blob-locator>",
     help="Read <blob-locator> and store it as <name> in the temp "
     + "directory used as the current working directory for running the command. "
     + "May be specified multiple times.",
 )
+@click.option(
+    "--xblob",
+    multiple=True,
+    type=(str, str),
+    metavar="<name>=<blob-locator> <key>",
+    help="Read encrypted <blob-locator> and decrypt it's contents into <name> directory "
+    + "in the temp directory used as the current working directory for running the command. "
+    + "May be specified multiple times.",
+)
+# TODO key_id > max_id retries
 @click.argument("command", nargs=1)
 @click.argument("command_args", metavar="[ARGS]...", nargs=-1)
 def cmd_read(**opts: tp.Any) -> None:
     """
-    Read blobs and execute given <command>.
-    Note: to pass any options to the command, prepend it with "--".
+    Read blobs and execute given command.
+    Note: to pass any options to the <command>, prepend it with "--".
     """
+
+    blobs: tp.Dict[str, Locator] = {}
+
+    def validate_blob(s: str, param_hint: str) -> str:
+        fields = s.split("=", 1)
+
+        if len(fields) != 2:
+            raise click.BadParameter("missing a required equals sign", param_hint=param_hint)
+
+        if fields[0] in blobs:
+            raise click.BadParameter(f"\"{fields[0]}\" blob name is specified multiple times", param_hint=param_hint)
+
+        blobs[fields[0]] = parse_locator(fields[1])
+
+        return fields[0]
+
+    for i in opts["blob"]:
+        validate_blob(i, "--blob")
+
+    xblobs: tp.Dict[str, ReaderKey] = {}
+
+    for i, j in opts["xblob"]:
+        xblobs[validate_blob(i, "--xblob")] = parse_reader_key(j)
+
     with tempdir() as td:
         tdp = pathlib.Path(td)
 
         errors = False
 
-        for name, loc in opts["blob"].items():
+        for name, loc in blobs.items():
+            reader_key = xblobs.get(name)
+
             try:
                 backend = backends.storage_backend(loc.backend)
                 data = backend.load(
                     loc=loc.loc,
                     opts=loc.opts,
                 )
-                tdp.joinpath(name).write_bytes(data)
+
+                name_path = tdp / name
+
+                if reader_key:
+                    name_path.mkdir()
+                    cb = _crypto.CryptoBlob()
+                    cb.load_from_blob(data)
+                    cb.writeout_tenant(
+                        name_path,
+                        key_id=reader_key.key_id,
+                        tenant_key=reader_key.key,
+                    )
+                else:
+                    name_path.write_bytes(data)
             except backend_intf.BackendError as e:
                 logger.error(f"{short_locator_descr(loc)}: {e}")
                 errors = True
