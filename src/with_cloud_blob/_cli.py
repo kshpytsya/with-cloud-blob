@@ -351,8 +351,9 @@ def cmd_xmodify(**opts: tp.Any) -> None:
         with tempdir() as td:
             tdp = pathlib.Path(td)
 
+            cb = _crypto.CryptoBlob()
+
             if blob is not None:
-                cb = _crypto.CryptoBlob()
                 cb.load_from_blob(blob)
 
                 master_data = cb.unseal_master(opts["key"])
