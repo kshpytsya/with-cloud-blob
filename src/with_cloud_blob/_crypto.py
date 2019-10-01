@@ -1,3 +1,4 @@
+import enum
 import functools
 import io
 import json
@@ -171,9 +172,15 @@ def compressed_avro_load(
     return data
 
 
+class FileMetadataFlag(enum.IntFlag):
+    SYMLINK = 1
+    SYMLINK_ABS = 2
+
+
 @dataclass
 class FileMetadata:
     mtime_ns: int
+    flags: int
 
 
 @dataclass
@@ -182,35 +189,65 @@ class FilesCollectionItem:
     body_id: int
 
 
-@dataclass
 class FilesCollection:
     bodies: tp.List[bytes]
+    _bodies_dict: tp.Dict[bytes, int]
     files: tp.Dict[str, FilesCollectionItem]
+
+    def __init__(self) -> None:
+        self.bodies = []
+        self.files = {}
+        self._bodies_dict = {}
+
+    def add_body(self, body: bytes) -> int:
+        result = self._bodies_dict.get(body)
+
+        if result is None:
+            result = len(self.bodies)
+            self.bodies.append(body)
+            self._bodies_dict[body] = result
+
+        return result
 
 
 def collect_files(src: pathlib.Path) -> FilesCollection:
-    result = FilesCollection([], {})
-
-    bodies: tp.Dict[bytes, int] = {}
+    result = FilesCollection()
 
     for i in src.rglob("*"):
-        if i.is_dir():
-            continue
-        elif i.is_file():
-            body = i.read_bytes()
-            body_id = bodies.get(body)
+        is_symlink = i.is_symlink()
+        if is_symlink or i.is_file():
+            flags = 0
 
-            if body_id is None:
-                body_id = len(result.bodies)
-                result.bodies.append(body)
-                bodies[body] = body_id
+            if is_symlink:
+                flags |= FileMetadataFlag.SYMLINK
+                target = os.readlink(i)
+                target_path = pathlib.Path(target)
+
+                if target_path.is_absolute():
+                    flags |= FileMetadataFlag.SYMLINK_ABS
+                    resolved_target = target_path.resolve()
+                    try:
+                        target = str(resolved_target.relative_to(src))
+                    except ValueError:
+                        raise Error(
+                            f"\"{i}\" absolute symlink points to \"{target}\" which is outside \"{src}\"",
+                        )
+
+                body = target.encode()
+                mtime_ns = i.lstat().st_mtime_ns
+            else:
+                body = i.read_bytes()
+                mtime_ns = i.stat().st_mtime_ns
 
             result.files[str(i.relative_to(src))] = FilesCollectionItem(
                 metadata=FileMetadata(
-                    mtime_ns=i.stat().st_mtime_ns,
+                    mtime_ns=mtime_ns,
+                    flags=flags,
                 ),
-                body_id=body_id,
+                body_id=result.add_body(body),
             )
+        elif i.is_dir():
+            continue
         else:
             raise Error(f"don't know how to deal with \"{i}\"")
 
@@ -226,6 +263,7 @@ class FilesPartitionsItem:
     def to_data(self) -> tp.Any:
         return {
             "mtime_ns": self.metadata.mtime_ns,
+            "flags": self.metadata.flags,
             "partition_id": self.partition_id,
             "body_id": self.body_id,
         }
@@ -236,6 +274,7 @@ class FilesPartitionsItem:
             return FilesPartitionsItem(
                 FileMetadata(
                     mtime_ns=data["mtime_ns"],
+                    flags=data["flags"],
                 ),
                 partition_id=data["partition_id"],
                 body_id=data["body_id"],
@@ -267,6 +306,7 @@ def partition_files(collection: FilesCollection) -> FilesPartitions:
         key: str
         name: str
         f: FilesCollectionItem
+        body_id: int
 
     files: tp.List[File] = []
 
@@ -274,6 +314,7 @@ def partition_files(collection: FilesCollection) -> FilesPartitions:
         prefix, tail = strip_prefix(fname, ["master/", "tenants/"])
 
         key = None
+        body_id = f.body_id
 
         if prefix == 0:
             key = ""
@@ -286,8 +327,54 @@ def partition_files(collection: FilesCollection) -> FilesPartitions:
         if key is None:
             raise Error(f"don't know how to deal with \"{fname}\"")
 
-        keys_by_body_id.setdefault(f.body_id, set()).add(key)
-        files.append(File(key=key, name=fname, f=f))
+        if f.metadata.flags & FileMetadataFlag.SYMLINK:
+            def validate_symlink(body_id: int) -> int:
+                target = collection.bodies[body_id].decode()
+                target_parts = target.split("/")
+
+                if key:
+                    required_prefix = ["tenants", key]
+                else:
+                    required_prefix = ["master"]
+
+                required_prefix_str = "/".join(required_prefix)
+
+                if f.metadata.flags & FileMetadataFlag.SYMLINK_ABS:
+                    if target_parts[:len(required_prefix)] != required_prefix:
+                        raise Error(
+                            f"\"{fname}\" absolute symlink points to \"{target}\" "
+                            f"which is outside \"{required_prefix_str}\"",
+                        )
+                    body_id = collection.add_body("/".join(target_parts[len(required_prefix):]).encode())
+                else:
+                    cur_dir = fname.split("/")
+                    for part in target_parts:
+                        if part == ".":
+                            pass
+                        elif part == "..":
+                            if cur_dir:
+                                cur_dir.pop()
+                            else:
+                                raise Error(
+                                    f"\"{fname}\" symlink points to \"{target}\" "
+                                    f"which is outside \"{required_prefix_str}\"",
+                                )
+                        else:
+                            cur_dir.append(part)
+
+                return body_id
+
+            body_id = validate_symlink(body_id)
+
+        keys_by_body_id.setdefault(body_id, set()).add(key)
+        files.append(
+            File(
+                key=key,
+                name=fname,
+                f=f,
+                body_id=body_id,
+            ),
+        )
 
     keyset_to_partition: tp.Dict[tp.FrozenSet[str], int] = {}
 
@@ -311,7 +398,7 @@ def partition_files(collection: FilesCollection) -> FilesPartitions:
             result.used_partitions.setdefault(key, set()).add(partition_id)
 
     for i in files:
-        partition_id, body_id = body_id_to_partition_body_id[i.f.body_id]
+        partition_id, body_id = body_id_to_partition_body_id[i.body_id]
         result.files.setdefault(i.key, {})[i.name] = FilesPartitionsItem(
             metadata=i.f.metadata,
             partition_id=partition_id,
@@ -343,8 +430,18 @@ def writeout(
 
             body = partitions[f.partition_id][f.body_id]
 
-            dest_path.write_bytes(body)
-            os.utime(dest_path, ns=(f.metadata.mtime_ns, f.metadata.mtime_ns))
+            if f.metadata.flags & FileMetadataFlag.SYMLINK:
+                body_s = body.decode()
+                if f.metadata.flags & FileMetadataFlag.SYMLINK_ABS:
+                    dest_path.symlink_to(dest / (prefix + body_s))
+                else:
+                    dest_path.symlink_to(body_s)
+
+                # TODO lutime
+            else:
+                dest_path.write_bytes(body)
+
+                os.utime(dest_path, ns=(f.metadata.mtime_ns, f.metadata.mtime_ns))
 
 
 @dataclass

@@ -79,24 +79,32 @@ def test_asymm_encrypt_decrypt() -> None:
 
 
 @pytest.mark.parametrize(
-    "files",
+    "files,symlinks",
     [
-        {},
-        {"a": b""},
-        {"a/b": b""},
-        {"x": b"abc", "y/z": b"cde"},
-        {
-            "big": b"\x00" * 10000,
-            "z/big2": b"\x00" * 10000,
-            "big3": b"\x01" * 1000,
-        },
+        ({}, {}),
+        ({"a": b""}, {}),
+        ({"a/b": b""}, {}),
+        ({"x": b"abc", "y/z": b"cde"}, {}),
+        (
+            {
+                "big": b"\x00" * 10000,
+                "z/big2": b"\x00" * 10000,
+                "big3": b"\x01" * 1000,
+            },
+            {
+                "link_to_big": "=big",
+                "z/abs_link_to_big": "=big",
+                "z/rel_link_to_big": "../big",
+            },
+        ),
     ],
 )
 def test_collect_files(
     tmpdir: tp.Any,
     files: tp.Dict[str, bytes],
+    symlinks: tp.Dict[str, str],
 ) -> None:
-    tmpdir = pathlib.Path(tmpdir)
+    tmpdir = pathlib.Path(tmpdir).resolve()
 
     mtimes: tp.Dict[str, int] = {}
     identities: tp.Dict[bytes, int] = {}
@@ -109,9 +117,18 @@ def test_collect_files(
         mtimes[fname] = fpath.stat().st_mtime_ns
         fidentities[fname] = identities.setdefault(fbody, len(identities))
 
+    for fname, ftarget in symlinks.items():
+        fpath = tmpdir.joinpath(fname)
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+
+        if ftarget[0] == "=":
+            fpath.symlink_to(tmpdir.joinpath(ftarget[1:]))
+        else:
+            fpath.symlink_to(ftarget)
+
     collected = cr.collect_files(tmpdir)
 
-    assert collected.files.keys() == files.keys()
+    assert set(collected.files.keys()) == set(files.keys()).union(symlinks.keys())
 
     bodyid2id: tp.Dict[int, int] = {}
     id2bodyid: tp.Dict[int, int] = {}
@@ -125,9 +142,19 @@ def test_collect_files(
         assert bodyid2id.setdefault(f.body_id, fidentity) == fidentity
         assert id2bodyid.setdefault(fidentity, f.body_id) == f.body_id
 
+    for fname, ftarget in symlinks.items():
+        f = collected.files[fname]
+        assert f.metadata.flags & cr.FileMetadataFlag.SYMLINK
+        if ftarget[0] == "=":
+            assert f.metadata.flags & cr.FileMetadataFlag.SYMLINK_ABS
+            assert collected.bodies[f.body_id] == ftarget[1:].encode()
+        else:
+            assert not(f.metadata.flags & cr.FileMetadataFlag.SYMLINK_ABS)
+            assert collected.bodies[f.body_id] == ftarget.encode()
+
 
 def test_partition_files_empty() -> None:
-    collection = cr.FilesCollection(bodies=[], files={})
+    collection = cr.FilesCollection()
     expected_result = cr.FilesPartitions(
         partitions=[],
         used_partitions={},
@@ -139,23 +166,17 @@ def test_partition_files_empty() -> None:
 
 def test_partition_files() -> None:
     prefixes = ["master/", "tenants/one/", "tenants/two/"]
-    collection = cr.FilesCollection(
-        bodies=[
-            f"body{k}_{i}".encode()
-            for k in range(2)
-            for i in range(1, 8)
-        ],
-        files={
-            f"{prefix}{k}_{j}_{i}": cr.FilesCollectionItem(
-                metadata=cr.FileMetadata(mtime_ns=100 * j + i),
-                body_id=i - 1 + k * 7,
-            )
-            for k in range(2)
-            for j, prefix in enumerate(prefixes)
-            for i in range(1, 8)
-            if (i >> j) & 1
-        },
-    )
+    collection = cr.FilesCollection()
+    collection.files.update({
+        f"{prefix}{k}_{j}_{i}": cr.FilesCollectionItem(
+            metadata=cr.FileMetadata(mtime_ns=100 * j + i, flags=0),
+            body_id=collection.add_body(f"body{k}_{i}".encode()),
+        )
+        for k in range(2)
+        for j, prefix in enumerate(prefixes)
+        for i in range(1, 8)
+        if (i >> j) & 1
+    })
     result = cr.partition_files(collection)
 
     keys = ["", "one", "two"]
@@ -210,11 +231,11 @@ def test_writeout(
     ]
     files = {
         "x/": {
-            "empty": cr.FilesPartitionsItem(cr.FileMetadata(mtime_ns=1), partition_id=0, body_id=0),
-            "a1": cr.FilesPartitionsItem(cr.FileMetadata(mtime_ns=2), partition_id=0, body_id=1),
-            "d1/d2/a2": cr.FilesPartitionsItem(cr.FileMetadata(mtime_ns=3), partition_id=0, body_id=2),
-            "d1/a2": cr.FilesPartitionsItem(cr.FileMetadata(mtime_ns=4), partition_id=0, body_id=2),
-            "b": cr.FilesPartitionsItem(cr.FileMetadata(mtime_ns=5), partition_id=1, body_id=0),
+            "empty": cr.FilesPartitionsItem(cr.FileMetadata(mtime_ns=1, flags=0), partition_id=0, body_id=0),
+            "a1": cr.FilesPartitionsItem(cr.FileMetadata(mtime_ns=2, flags=0), partition_id=0, body_id=1),
+            "d1/d2/a2": cr.FilesPartitionsItem(cr.FileMetadata(mtime_ns=3, flags=0), partition_id=0, body_id=2),
+            "d1/a2": cr.FilesPartitionsItem(cr.FileMetadata(mtime_ns=4, flags=0), partition_id=0, body_id=2),
+            "b": cr.FilesPartitionsItem(cr.FileMetadata(mtime_ns=5, flags=0), partition_id=1, body_id=0),
         },
     }
 

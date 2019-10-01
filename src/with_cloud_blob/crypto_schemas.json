@@ -30,6 +30,7 @@
       "fields":
       [
         {"name": "mtime_ns", "type": "int"},
+        {"name": "flags", "type": "int"},
         {"name": "partition_id", "type": "int"},
         {"name": "body_id", "type": "int"}
       ]
