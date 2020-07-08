@@ -221,7 +221,7 @@ def test_parallel_modify_s3_dynamodb(
     s3_name = f"{s3_bucket.name}/file1"
 
     if lock == "file":
-        file1 = tmp_path / f"file1"
+        file1 = tmp_path / "file1"
         lock_loc = f"|file|{file1}"
     elif lock == "dynamodb":
         lock_loc = f"|dynamodb|{s3_name}|dynamodb_endpoint={common.DYNAMODB_ENDPOINT}|region=us-east-1"
