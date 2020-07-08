@@ -11,6 +11,7 @@ install:
   - pip list --format columns
 python:
   - "3.7"
+  - "3.8"
 script:
   - bash --version
   - /bin/sh --version
