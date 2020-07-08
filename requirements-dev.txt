@@ -1,6 +1,6 @@
 flake8
 invoke
-python-coveralls
+coveralls
 tox
 tox-venv
 twine
